@@ -12,7 +12,7 @@
 import { mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { advise, dedupe, median } from "./tune.js";
+import { advise, dedupe, median, observe, streams } from "./tune.js";
 import { AGENTS, agentById } from "./agents.js";
 import { CLAUDE_ENV } from "./claude.js";
 import { openStore } from "./store.js";
@@ -155,6 +155,14 @@ async function analyzeAgent(store, agent, ctx) {
   const calls = dedupe(store.calls(agent.id));
   // 中途换过模型的对话不知道开头多长，拿这个 agent 所有对话的开头来补。
   const agentBase = median(calls.filter((call) => call.seq === 0).map((call) => call.prompt));
+  // 同一个 agent 压缩的方式一样（留多少最近的对话、摘要多长），某个模型没压缩过就借这里量到的。
+  const pooled = observe(streams(calls));
+  const borrowed = {
+    base: agentBase,
+    after: pooled.compacts > 0 ? pooled.after : 0,
+    rework: pooled.compacts >= 5 ? pooled.rework : 0,
+    assumedSummary: agent.assumedSummary,
+  };
   const byModel = groupByModel(calls);
   if (byModel.size === 0) {
     return { agent: agent.id, label: agent.label, files: scanned.files, filesRead: scanned.read, models: [] };
@@ -189,7 +197,7 @@ async function analyzeAgent(store, agent, ctx) {
           current: 0,
           window: 0,
           weights,
-          base: agentBase,
+          ...borrowed,
         }),
       };
     }
@@ -202,7 +210,7 @@ async function analyzeAgent(store, agent, ctx) {
       reserve: agent.reserve,
       current,
       appliedAt: row?.appliedAt ?? null,
-      advice: advise(calls, { ...agent.tune(win.window), current: current.value, weights, base: agentBase }),
+      advice: advise(calls, { ...agent.tune(win.window), current: current.value, weights, ...borrowed }),
     };
   });
   return {

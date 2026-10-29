@@ -143,3 +143,19 @@ test("从头开始的对话优先：seq 为 0 的才算开头", () => {
   const advice = advise([...head, ...mid], opts({ current: 983_616, base: 99_999 }));
   assert.equal(advice.facts.base, 8_000);
 });
+
+test("没压缩过的模型借同一个 agent 量到的压缩后大小和返工", () => {
+  const calls = [];
+  for (let i = 0; i < 5; i++) calls.push(...conversation(`s${i}`, { calls: 100, start: 5_000, growth: 5_000, t0: i * 1e6 }));
+  const guessed = advise(calls, opts({ current: 983_616 }));
+  assert.equal(guessed.facts.afterFrom, "guess");
+  assert.equal(guessed.facts.afterUsed, 15_000);
+  const pi = advise(calls, opts({ current: 983_616, assumedSummary: 30_000 }));
+  assert.equal(pi.facts.afterUsed, 35_000);
+  const borrowed = advise(calls, opts({ current: 983_616, after: 50_000, rework: 20_000 }));
+  assert.equal(borrowed.facts.afterFrom, "agent");
+  assert.equal(borrowed.facts.afterUsed, 50_000);
+  assert.equal(borrowed.facts.reworkUsed, 20_000);
+  // 压缩后剩得越多，压缩越不划算，建议的点就越靠后。
+  assert.ok(borrowed.best >= guessed.best);
+});

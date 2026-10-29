@@ -44,6 +44,8 @@ export const pi = {
   /** 写设置时要拿 Pi 的 proper-lockfile 锁。 */
   piLock: true,
   reserve: 0,
+  /** Pi 压缩时留下最近 keepRecentTokens（默认 2 万）的对话，再加一份摘要。 */
+  assumedSummary: 30_000,
   reader: piReader,
 
   /** Pi 判断压缩用它目录里的窗口：`--list-models` 加 models.json 里的精确值。 */
@@ -88,6 +90,7 @@ export const claude = {
   settingsPath: (home) => join(home, ".claude", "settings.json"),
   piLock: false,
   reserve: CLAUDE_RESERVE,
+  assumedSummary: 10_000,
   reader: claudeReader,
 
   /** 会话里没记窗口，按用过多长的提示词推，所以都是约数。 */

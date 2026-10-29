@@ -282,7 +282,11 @@ export default class CompactionTune extends View {
     const known = entry.current?.threshold ?? null;
     const now = known ?? (advice ? advice.current - entry.reserve : null);
     if (now !== null) {
-      const source = entry.current ? sourceLabel(group.agent, entry.current.source) : "按你的压缩记录推算";
+      const source = entry.current
+        ? sourceLabel(group.agent, entry.current.source)
+        : advice.facts.compacts >= 3
+          ? "按你的压缩记录推算"
+          : "不知道窗口，按 100 万算";
       lines.push(line("现在", `${known === null ? "约 " : ""}${formatTokens(now)} 时压缩`, source, cx));
     }
 
@@ -318,10 +322,15 @@ export default class CompactionTune extends View {
     lines.push(this.curve(entry, cx));
     lines.push(hint(facts(entry, advice), cx));
     if (advice.facts.compacts === 0) {
+      const f = advice.facts;
+      const after =
+        f.afterFrom === "agent"
+          ? `借用 ${group.label} 别的模型量到的，约 ${formatTokens(f.afterUsed)}`
+          : `按对话开头加 ${formatTokens(f.afterUsed - f.base)}，约 ${formatTokens(f.afterUsed)}`;
       lines.push(
         hint(
-          `这个模型在你的记录里还没压缩过：压缩后剩多少（按对话开头加 1 万，约 ${formatTokens(advice.facts.afterUsed)}）` +
-            `和返工（按 ${formatTokens(advice.facts.reworkUsed)}）都是估的，「省多少」只能参考。`,
+          `这个模型在你的记录里还没压缩过：压缩后剩多少（${after}）和返工（按 ${formatTokens(f.reworkUsed)}）` +
+            "不是它自己的数，「省多少」只能参考。",
           cx,
         ),
       );

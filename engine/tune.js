@@ -191,6 +191,8 @@ function roundUp(value, step) {
  * - `window`：模型的窗口，设定不能超过它；0 表示不知道
  * - `weights`：各类 token 的折算；不给就按模型名猜
  * - `base`：这个模型没有从头开始的对话时，拿来当开头的值
+ * - `after` / `rework`：这个模型没见过（几次）压缩时，借用的压缩后大小和返工（同一个 agent 量到的）
+ * - `assumedSummary`：连借的都没有时，假设压缩后比开头多这么多
  */
 export function advise(calls, opts) {
   const ss = streams(calls);
@@ -209,9 +211,20 @@ export function advise(calls, opts) {
 
   const b = base(ss, opts.base);
   facts.base = b;
-  const after = facts.after || b + ASSUMED_SUMMARY;
-  const rework = facts.compacts < MIN_OBSERVED_COMPACTS ? Math.max(facts.rework, ASSUMED_REWORK) : facts.rework;
-  // 重放实际用的值。见过的压缩太少时它们是估的，界面要说明。
+  // 这个模型自己没压缩过时，先借同一个 agent 别的模型量到的（`opts.after` / `opts.rework`），
+  // 都没有才估。压缩会留下最近的一截对话和摘要，只按「开头加一点」估会偏小，压缩就显得太便宜。
+  let after = facts.after;
+  facts.afterFrom = "own";
+  if (!after && opts.after > 0) {
+    after = opts.after;
+    facts.afterFrom = "agent";
+  } else if (!after) {
+    after = b + (opts.assumedSummary ?? ASSUMED_SUMMARY);
+    facts.afterFrom = "guess";
+  }
+  const reworkFloor = opts.rework > 0 ? opts.rework : ASSUMED_REWORK;
+  const rework = facts.compacts < MIN_OBSERVED_COMPACTS ? Math.max(facts.rework, reworkFloor) : facts.rework;
+  // 重放实际用的值。见过的压缩太少时它们是借来的或估的，界面要说明。
   facts.afterUsed = after;
   facts.reworkUsed = rework;
   const reserve = opts.reserve ?? 0;
