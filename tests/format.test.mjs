@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { formatTokens, formatPercent, formatSeconds, savings } from "../format.js";
+import { formatTokens, formatPercent, formatSeconds, savings, sourceLabel } from "../format.js";
 
 test("token 数按万显示", () => {
   assert.equal(formatTokens(8192), "8192");
@@ -24,4 +24,10 @@ test("百分比和时长", () => {
 test("省下的比例", () => {
   assert.equal(savings({ cost: 100, low: 80 }), 0.2);
   assert.equal(savings({ cost: 0, low: 0 }), 0);
+});
+
+test("来源说明按 agent 区分默认值", () => {
+  assert.equal(sourceLabel("pi", "default"), "Pi 默认");
+  assert.equal(sourceLabel("claude", "default"), "Claude Code 默认");
+  assert.equal(sourceLabel("claude", "ours"), "插件设的");
 });

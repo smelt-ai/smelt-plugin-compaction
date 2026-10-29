@@ -2,33 +2,22 @@
 // 子进程跑这里：smelt 自带的 smelt-pi 是 Bun 编出来的，带上 `BUN_BE_BUN=1` 就是一个 Bun。
 //
 //   BUN_BE_BUN=1 ~/.smelt/bin/smelt-pi engine/cli.js analyze --home ~ --smelt-pi ~/.smelt/bin/smelt-pi
-//   BUN_BE_BUN=1 ~/.smelt/bin/smelt-pi engine/cli.js apply --home ~ --model p/m --threshold 256000 --window 1000000
-//   BUN_BE_BUN=1 ~/.smelt/bin/smelt-pi engine/cli.js undo --home ~ --model p/m
+//   BUN_BE_BUN=1 ~/.smelt/bin/smelt-pi engine/cli.js apply --home ~ --agent pi --model p/m --value 256000 --window 1000000
+//   BUN_BE_BUN=1 ~/.smelt/bin/smelt-pi engine/cli.js undo --home ~ --agent pi --model p/m
 //
-// 子进程的环境变量是空的，主目录这些都从参数传。stdout 每行一个 JSON：
+// 子进程的环境变量是空的，主目录这些都从参数传；插件看得到的 CLAUDE_CODE_AUTO_COMPACT_WINDOW
+// 用 `--claude-env` 传进来。stdout 每行一个 JSON：
 // `{ type: "progress" | "result" | "applied" | "undone" | "error", ... }`。
 
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { advise, weightsFor } from "./tune.js";
-import { piReader, weightsFromCosts } from "./pi.js";
-import { parseListModels, modelsJsonWindows, mergeWindows } from "./windows.js";
-import {
-  DEFAULT_RESERVE,
-  autoCompactionEnabled,
-  currentThreshold,
-  overrideOf,
-  withOverride,
-  withoutOverride,
-} from "./pi-settings.js";
+import { advise } from "./tune.js";
+import { AGENTS, agentById } from "./agents.js";
+import { CLAUDE_ENV } from "./claude.js";
 import { openStore } from "./store.js";
 
 const PLUGIN_ID = "com.smelt.compaction-tune";
-const AGENT = "pi";
-/** 候选压缩点从这里起，按这个步长试。 */
-const MIN_THRESHOLD = 50_000;
-const STEP = 10_000;
 /** smelt-pi 和守护的握手版本。猜错了它会在 stderr 说自己是几，照着再跑一次。 */
 const PROTOCOL_GUESS = "1";
 const LIST_MODELS_TIMEOUT_MS = 60_000;
@@ -52,14 +41,8 @@ function parseArgs(argv) {
   return { command, flags };
 }
 
-function paths(home) {
-  const agentDir = join(home, ".pi", "agent");
-  return {
-    sessions: join(agentDir, "sessions"),
-    settings: join(agentDir, "settings.json"),
-    models: join(agentDir, "models.json"),
-    store: join(home, ".smelt", "plugin-data", PLUGIN_ID, "state.sqlite3"),
-  };
+function storePath(home) {
+  return join(home, ".smelt", "plugin-data", PLUGIN_ID, "state.sqlite3");
 }
 
 async function readJson(path, fallback) {
@@ -89,8 +72,8 @@ async function sessionFiles(dir) {
 }
 
 /** 流式按行读，不把整个文件放进内存。 */
-async function readCalls(path) {
-  const read = piReader(path);
+async function readCalls(path, reader) {
+  const read = reader(path);
   const calls = [];
   const decoder = new TextDecoder();
   let rest = "";
@@ -114,22 +97,22 @@ async function readCalls(path) {
 }
 
 /** 只重读大小或修改时间变了的会话文件。 */
-async function scan(store, dir) {
-  const files = await sessionFiles(dir);
+async function scan(store, agent, home) {
+  const files = await sessionFiles(agent.sessionsDir(home));
   let read = 0;
-  emit({ type: "progress", phase: "scan", done: 0, total: files.length });
+  emit({ type: "progress", phase: "scan", agent: agent.label, done: 0, total: files.length });
   for (const [index, path] of files.entries()) {
     const info = await stat(path);
     const size = info.size;
     const mtimeMs = Math.trunc(info.mtimeMs);
     const cached = store.fileState(path);
     if (!cached || cached.size !== size || cached.mtimeMs !== mtimeMs) {
-      store.replaceFile(path, AGENT, size, mtimeMs, await readCalls(path));
+      store.replaceFile(path, agent.id, size, mtimeMs, await readCalls(path, agent.reader));
       read += 1;
     }
-    emit({ type: "progress", phase: "scan", done: index + 1, total: files.length });
+    emit({ type: "progress", phase: "scan", agent: agent.label, done: index + 1, total: files.length });
   }
-  store.forgetMissing(AGENT, new Set(files));
+  store.forgetMissing(agent.id, new Set(files));
   return { files: files.length, read };
 }
 
@@ -145,16 +128,16 @@ async function runListModels(home, smeltPi, protocol) {
   return { code: await child.exited, out, err };
 }
 
-/** Pi 自己认的各模型窗口。 */
-async function piWindows(home, smeltPi, modelsPath) {
-  const exact = modelsJsonWindows(await readJson(modelsPath, {}));
+/** `smelt-pi --list-models` 的输出；失败时 `{ error }`。 */
+async function listPiModels(home, smeltPi) {
+  if (!smeltPi) return { error: "没有给 --smelt-pi" };
   let result = await runListModels(home, smeltPi, PROTOCOL_GUESS);
   const own = /smelt-pi 的协议是 (\d+)/.exec(result.err);
   if (result.code !== 0 && own) result = await runListModels(home, smeltPi, own[1]);
   if (result.code !== 0) {
-    return { windows: exact, error: `smelt-pi --list-models 失败：${result.err.trim() || `退出码 ${result.code}`}` };
+    return { error: `smelt-pi --list-models 失败：${result.err.trim() || `退出码 ${result.code}`}` };
   }
-  return { windows: mergeWindows(parseListModels(result.out), exact), error: null };
+  return { text: result.out };
 }
 
 function groupByModel(calls) {
@@ -164,78 +147,83 @@ function groupByModel(calls) {
     if (list) list.push(call);
     else by.set(call.model, [call]);
   }
-  return [...by.entries()].sort((a, b) => b[1].length - a[1].length);
+  return new Map([...by.entries()].sort((a, b) => b[1].length - a[1].length));
 }
 
-async function analyze(flags) {
-  const p = paths(flags.home);
-  const store = openStore(p.store);
-  try {
-    const scanned = await scan(store, p.sessions);
-    emit({ type: "progress", phase: "windows" });
-    const { windows, error: windowsError } = flags["smelt-pi"]
-      ? await piWindows(flags.home, flags["smelt-pi"], p.models)
-      : { windows: modelsJsonWindows(await readJson(p.models, {})), error: "没有给 --smelt-pi" };
-    const settings = await readJson(p.settings, {});
-    const applied = store.appliedAll(AGENT);
-    emit({ type: "progress", phase: "replay" });
-    const models = groupByModel(store.calls(AGENT)).map(([model, calls]) => {
-      const weights = weightsFromCosts(calls, weightsFor(model));
-      let row = applied.get(model) ?? null;
-      // 记着写过、文件里却不是那个值了：用户自己改过，从此不算我们的。
-      if (row && overrideOf(settings, model) !== row.value) {
-        store.forgetApplied(AGENT, model);
-        row = null;
-      }
-      const win = windows.get(model);
-      if (!win) {
-        return {
-          model,
-          calls: calls.length,
-          window: null,
-          current: null,
-          advice: advise(calls, { min: MIN_THRESHOLD, max: 1_000_000, step: STEP, reserve: 0, current: 0, window: 0, weights }),
-        };
-      }
-      const current = currentThreshold(settings, model, win.window, row);
-      // 压缩点最高到 窗口 − Pi 默认的留空：再高，最后一次回复可能装不下。
-      const top = win.window - DEFAULT_RESERVE;
+async function analyzeAgent(store, agent, ctx) {
+  const scanned = await scan(store, agent, ctx.home);
+  const byModel = groupByModel(store.calls(agent.id));
+  if (byModel.size === 0) {
+    return { agent: agent.id, label: agent.label, files: scanned.files, filesRead: scanned.read, models: [] };
+  }
+  emit({ type: "progress", phase: "windows", agent: agent.label });
+  const { windows, error: windowsError } = await agent.windows(ctx, byModel);
+  const settingsPath = agent.settingsPath(ctx.home);
+  const settings = await readJson(settingsPath, {});
+  const applied = store.appliedAll(agent.id);
+  emit({ type: "progress", phase: "replay", agent: agent.label });
+  const models = [...byModel].map(([model, calls]) => {
+    const weights = agent.weights(calls, model);
+    let row = applied.get(model) ?? null;
+    // 记着写过、文件里却不是那个值了：用户自己改过，从此不算我们的。
+    if (row && agent.existing(settings, model) !== row.value) {
+      store.forgetApplied(agent.id, model);
+      row = null;
+    }
+    const win = windows.get(model);
+    if (!win) {
       return {
         model,
         calls: calls.length,
-        window: win.window,
-        windowApprox: win.approx,
-        current,
-        appliedAt: row?.appliedAt ?? null,
-        advice: advise(calls, {
-          min: MIN_THRESHOLD,
-          max: top,
-          step: STEP,
-          reserve: 0,
-          current: current.threshold,
-          window: top,
-          weights,
-        }),
+        window: null,
+        reserve: agent.reserve,
+        current: null,
+        advice: advise(calls, { min: 50_000, max: 1_000_000, step: 10_000, reserve: agent.reserve, current: 0, window: 0, weights }),
       };
-    });
-    emit({
-      type: "result",
-      agent: AGENT,
-      generatedAt: Date.now(),
-      files: scanned.files,
-      filesRead: scanned.read,
-      autoCompaction: autoCompactionEnabled(settings),
-      settingsPath: p.settings,
-      windowsError,
-      models,
-    });
+    }
+    const current = agent.current(settings, model, win.window, row, ctx);
+    return {
+      model,
+      calls: calls.length,
+      window: win.window,
+      windowApprox: win.approx,
+      reserve: agent.reserve,
+      current,
+      appliedAt: row?.appliedAt ?? null,
+      advice: advise(calls, { ...agent.tune(win.window), current: current.value, weights }),
+    };
+  });
+  return {
+    agent: agent.id,
+    label: agent.label,
+    files: scanned.files,
+    filesRead: scanned.read,
+    autoCompaction: agent.enabled(settings),
+    settingsPath,
+    windowsError,
+    models,
+  };
+}
+
+async function analyze(flags) {
+  const store = openStore(storePath(flags.home));
+  const ctx = {
+    home: flags.home,
+    env: flags["claude-env"] ? { [CLAUDE_ENV]: flags["claude-env"] } : {},
+    readJson,
+    listPiModels: () => listPiModels(flags.home, flags["smelt-pi"]),
+  };
+  try {
+    const agents = [];
+    for (const agent of AGENTS) agents.push(await analyzeAgent(store, agent, ctx));
+    emit({ type: "result", generatedAt: Date.now(), agents });
   } finally {
     store.close();
   }
 }
 
 /** 和 Pi 用同一把锁（proper-lockfile 的 `settings.json.lock` 目录）改它的设置。 */
-async function withSettingsLock(path, fn) {
+async function withPiLock(path, fn) {
   const lock = `${path}.lock`;
   for (let attempt = 1; ; attempt++) {
     try {
@@ -260,10 +248,24 @@ async function withSettingsLock(path, fn) {
   }
 }
 
+/** 换掉文件内容。设置文件是软链时写到它指向的文件，不把软链换成普通文件。 */
 async function writeJsonAtomic(path, value) {
-  const temp = `${path}.${process.pid}.tmp`;
+  const target = await realpath(path).catch(() => path);
+  const temp = `${target}.${process.pid}.tmp`;
   await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-  await rename(temp, path);
+  await rename(temp, target);
+}
+
+/** 读、改、写 agent 的设置文件，要锁就锁上。 */
+async function editSettings(agent, home, edit) {
+  const path = agent.settingsPath(home);
+  const run = async () => {
+    const settings = await readJson(path, {});
+    const next = await edit(settings);
+    if (next !== null) await writeJsonAtomic(path, next);
+  };
+  if (agent.piLock) await withPiLock(path, run);
+  else await run();
 }
 
 function integer(flags, name) {
@@ -272,52 +274,52 @@ function integer(flags, name) {
   return value;
 }
 
+function target(flags) {
+  if (!flags.model) throw new Error("缺少 --model");
+  return { agent: agentById(flags.agent ?? ""), model: flags.model };
+}
+
 async function apply(flags) {
-  const model = flags.model;
-  if (!model) throw new Error("缺少 --model");
-  const threshold = integer(flags, "threshold");
+  const { agent, model } = target(flags);
+  const value = integer(flags, "value");
   const window = integer(flags, "window");
-  const reserve = window - threshold;
-  if (reserve < DEFAULT_RESERVE) throw new Error(`压缩点太靠近窗口：至少要留 ${DEFAULT_RESERVE}`);
-  const p = paths(flags.home);
-  const store = openStore(p.store);
+  const store = openStore(storePath(flags.home));
   try {
-    await withSettingsLock(p.settings, async () => {
-      const settings = await readJson(p.settings, {});
-      const existing = overrideOf(settings, model);
-      const row = store.applied(AGENT, model);
+    let stored = null;
+    await editSettings(agent, flags.home, (settings) => {
+      const existing = agent.existing(settings, model);
+      const row = store.applied(agent.id, model);
       if (existing !== null && existing !== row?.value) {
-        throw new Error(`settings.json 里已经给 ${model} 设了 reserveTokens = ${existing}，插件不改你自己设的值`);
+        throw new Error(`${agent.settingsPath(flags.home)} 里已经给 ${model} 设了压缩点，插件不改你自己设的值`);
       }
-      await writeJsonAtomic(p.settings, withOverride(settings, model, reserve));
-      store.setApplied(AGENT, model, reserve);
+      const next = agent.apply(settings, model, value, window);
+      stored = next.stored;
+      return next.settings;
     });
-    emit({ type: "applied", model, threshold, reserve });
+    // 文件写成了才记账：写失败时不能留一条「我们写过」的记录。
+    store.setApplied(agent.id, model, stored);
+    emit({ type: "applied", agent: agent.id, model, value });
   } finally {
     store.close();
   }
 }
 
 async function undo(flags) {
-  const model = flags.model;
-  if (!model) throw new Error("缺少 --model");
-  const p = paths(flags.home);
-  const store = openStore(p.store);
+  const { agent, model } = target(flags);
+  const store = openStore(storePath(flags.home));
   try {
-    const row = store.applied(AGENT, model);
+    const row = store.applied(agent.id, model);
     let restored = false;
     if (row) {
-      await withSettingsLock(p.settings, async () => {
-        const settings = await readJson(p.settings, {});
+      await editSettings(agent, flags.home, (settings) => {
         // 文件里已经不是我们写的值了，就是用户自己改过，只忘掉记录，不动文件。
-        if (overrideOf(settings, model) === row.value) {
-          await writeJsonAtomic(p.settings, withoutOverride(settings, model));
-          restored = true;
-        }
+        if (agent.existing(settings, model) !== row.value) return null;
+        restored = true;
+        return agent.undo(settings, model);
       });
-      store.forgetApplied(AGENT, model);
+      store.forgetApplied(agent.id, model);
     }
-    emit({ type: "undone", model, restored });
+    emit({ type: "undone", agent: agent.id, model, restored });
   } finally {
     store.close();
   }
