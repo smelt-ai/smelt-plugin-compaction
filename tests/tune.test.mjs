@@ -159,3 +159,13 @@ test("没压缩过的模型借同一个 agent 量到的压缩后大小和返工"
   // 压缩后剩得越多，压缩越不划算，建议的点就越靠后。
   assert.ok(borrowed.best >= guessed.best);
 });
+
+test("回退后重放的上下文跟着退回，不会凭空多出压缩", () => {
+  // 涨到 90 万，回退到 20 万，再涨到 60 万；从没超过 98 万。
+  const s = [];
+  let t = 0;
+  for (let p = 100_000; p <= 900_000; p += 100_000) s.push({ time: t++, stream: "x", prompt: p, out: 0, cut: false });
+  for (let p = 200_000; p <= 600_000; p += 100_000) s.push({ time: t++, stream: "x", prompt: p, out: 0, cut: false });
+  const w = { read: 0, write: 0, write1h: 0, out: 0 };
+  assert.equal(replay([s], 983_616, 50_000, 10_000, 0, w, 0).compacts, 0);
+});

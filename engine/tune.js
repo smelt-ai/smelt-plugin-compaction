@@ -31,6 +31,8 @@ export const DEFAULT_WEIGHTS = Object.freeze({ read: 0.1, write: 1, write1h: 1, 
 /** Anthropic 写缓存贵四分之一（一小时的贵一倍），输出便宜些。 */
 export const ANTHROPIC_WEIGHTS = Object.freeze({ read: 0.1, write: 1.25, write1h: 2, out: 5 });
 
+/** 不是压缩、提示词却掉到前一次的这个比例以下，算回退。 */
+const REWIND_SHARE = 0.6;
 /** 少于这么多次调用不给建议。 */
 export const MIN_CALLS = 50;
 /** 压缩后数这么多次调用来量返工。 */
@@ -158,8 +160,17 @@ export function replay(ss, threshold, after, b, rework, w, write) {
     cost += ctx * write + s[0].out * w.out;
     for (let i = 1; i < s.length; i++) {
       let d = s[i].prompt - s[i - 1].prompt;
-      // 这个人自己的压缩、回退不算增长：重放里上下文从它原来的地方接着长。
-      if (d < 0 || s[i].cut) d = 0;
+      if (s[i].cut) {
+        // 这个人自己的压缩不算增长：重放里由候选点决定什么时候压，上下文从原来的地方接着长。
+        d = 0;
+      } else if (s[i].prompt < REWIND_SHARE * s[i - 1].prompt) {
+        // 不是压缩却骤降：回退、换了分支。重放里的上下文也退回去，不然会比真实的长，
+        // 凭空多出压缩。
+        ctx = Math.min(ctx, s[i].prompt);
+        d = 0;
+      } else if (d < 0) {
+        d = 0;
+      }
       if (ctx + d > threshold && ctx > after) {
         cost += ctx * w.read + summary * w.out + (summary + rework) * write;
         ctx = after + rework;
