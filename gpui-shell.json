@@ -1,0 +1,6 @@
+{
+  "id": "com.smelt.compaction-tune",
+  "name": "压缩调优",
+  "version": "0.1.0",
+  "entry": "main.js"
+}
