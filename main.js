@@ -24,7 +24,7 @@ import { stat } from "fs/promises";
 import { join } from "path";
 import { context } from "smelt-workspace";
 
-import { formatTokens, formatPercent, formatSeconds, savings, sourceLabel, WRITES_TO } from "./format.js";
+import { formatTokens, formatPercent, formatSeconds, savings, sourceLabel, regions, REGION_TOLERANCES, WRITES_TO } from "./format.js";
 
 const SPACE = { xs: 4, sm: 8, md: 12, lg: 16 };
 const MONO = "SF Mono, Menlo, monospace";
@@ -51,6 +51,8 @@ export default class CompactionTune extends View {
     this.notice = null;
     /** 每次分析递增，过时的结果丢掉。 */
     this.runId = 0;
+    /** 在曲线上点选的压缩点（设定值）：卡片 key → value。没点过就用最省的。 */
+    this.picked = new Map();
     this.analyze(cx);
   }
 
@@ -134,13 +136,28 @@ export default class CompactionTune extends View {
       });
       this.busy = null;
       this.notice = error !== null ? { level: "error", text: error } : { level: "info", text: done(event) };
+      if (error === null) this.picked.delete(key);
       if (error === null) this.analyze(cx);
       cx.notify();
     });
   }
 
+  /// 这张卡片现在选中的点：点过柱子就是那根，没点过是最省的。
+  chosen(group, entry) {
+    const advice = entry.advice;
+    const value = this.picked.get(cardKey(group, entry)) ?? advice.best;
+    return (
+      advice.curve.find((p) => p.value === value) ?? {
+        value: advice.best,
+        cost: advice.low,
+        compacts: advice.compactsBest,
+        wait: advice.waitBest,
+      }
+    );
+  }
+
   apply(group, entry, cx) {
-    const value = entry.advice.best;
+    const value = this.chosen(group, entry).value;
     this.change(
       cardKey(group, entry),
       ["apply", "--agent", group.agent, "--model", entry.model, "--value", String(value), "--window", String(entry.window)],
@@ -303,23 +320,25 @@ export default class CompactionTune extends View {
       return box(lines, cx);
     }
 
-    const changed = advice.best !== advice.current;
+    const chosen = this.chosen(group, entry);
+    const changed = chosen.value !== advice.current;
+    const cheapestChanged = advice.best !== advice.current;
     lines.push(
       line(
-        "建议",
+        "最省",
         `${formatTokens(advice.best - entry.reserve)} 时压缩`,
-        changed ? `省约 ${formatPercent(savings(advice))}` : "现在就是最省的",
+        cheapestChanged ? `省约 ${formatPercent(savings(advice))}` : "现在就是最省的",
         cx,
       ),
     );
     if (changed) {
-      const parts = [`压缩 ${advice.compacts} → ${advice.compactsBest} 次`];
-      if (advice.facts.took > 0) {
-        parts.push(`共等 ${formatSeconds(advice.wait)} → ${formatSeconds(advice.waitBest)}`);
-      }
-      lines.push(hint(`按这段时间的对话重放：${parts.join("，")}。`, cx));
+      const parts = [`比现在省约 ${formatPercent(advice.cost > 0 ? (advice.cost - chosen.cost) / advice.cost : 0)}`];
+      parts.push(`压缩 ${advice.compacts} → ${chosen.compacts} 次`);
+      if (advice.facts.took > 0) parts.push(`共等 ${formatSeconds(advice.wait)} → ${formatSeconds(chosen.wait)}`);
+      lines.push(line("选中", `${formatTokens(chosen.value - entry.reserve)} 时压缩`, parts.join("，"), cx));
     }
-    lines.push(this.curve(entry, cx));
+    lines.push(this.curve(group, entry, chosen, cx));
+    lines.push(hint(regionText(entry), cx));
     lines.push(hint(facts(entry, advice), cx));
     if (advice.facts.compacts === 0) {
       const f = advice.facts;
@@ -335,8 +354,8 @@ export default class CompactionTune extends View {
         ),
       );
     }
-    if (changed && advice.best === advice.curve[0].value) {
-      lines.push(hint("建议已经是可试范围的最低处：再低，压缩完剩下的上下文离压缩点太近，很快又要压。", cx));
+    if (cheapestChanged && advice.best === advice.curve[0].value) {
+      lines.push(hint("最省的点已经是可试范围的最低处：再低，压缩完剩下的上下文离压缩点太近，很快又要压。", cx));
     }
 
     const source = entry.current?.source;
@@ -350,7 +369,7 @@ export default class CompactionTune extends View {
     } else if (changed) {
       actions.push(
         Button.new(`apply-${key}`)
-          .label(`采用：${formatTokens(advice.best - entry.reserve)} 时压缩`)
+          .label(`采用：${formatTokens(chosen.value - entry.reserve)} 时压缩`)
           .size("xsmall")
           .primary()
           .loading(this.busy === key)
@@ -374,34 +393,58 @@ export default class CompactionTune extends View {
       .on_click((_event, cx) => this.undo(group, entry, cx));
   }
 
-  /// 成本曲线：每个候选点一根柱，越高越费。建议的点用主色，现在的点用前景色。
-  curve(entry, cx) {
+  /// 成本曲线：每个候选点一根柱，越高越费。比最省多花不到 5% 的一段用深色，不到 10% 的用浅色，
+  /// 选中的点用主色、现在的点用前景色。点柱子选压缩点。
+  curve(group, entry, chosen, cx) {
     const colors = cx.theme().colors;
     const advice = entry.advice;
     const points = advice.curve;
     const costs = points.map((p) => p.cost);
     const low = Math.min(...costs);
     const high = Math.max(...costs);
+    const [near, fair] = REGION_TOLERANCES;
     const nearest = points.reduce(
       (best, p, i) => (Math.abs(p.value - advice.current) < Math.abs(points[best].value - advice.current) ? i : best),
       0,
     );
+    const key = cardKey(group, entry);
+    const fill = (p, i) => {
+      if (p.value === chosen.value) return { color: colors.primary, opacity: 1 };
+      if (i === nearest) return { color: colors.foreground, opacity: 1 };
+      if (p.cost <= low * (1 + near)) return { color: colors.primary, opacity: 0.45 };
+      if (p.cost <= low * (1 + fair)) return { color: colors.primary, opacity: 0.2 };
+      return { color: colors.border, opacity: 1 };
+    };
     return v_flex()
       .gap(2)
       .child(
         h_flex()
           .h(40)
-          .items_end()
           .gap(1)
           .children(
-            points.map((p, i) =>
-              div()
+            points.map((p, i) => {
+              const { color, opacity } = fill(p, i);
+              // 整列都能点，矮柱子也好点中。
+              return v_flex()
+                .id(`bar-${key}-${p.value}`)
                 .flex_1()
                 .min_w(1)
-                .h(high > low ? 4 + Math.round(((p.cost - low) / (high - low)) * 36) : 4)
-                .rounded(1)
-                .bg(p.value === advice.best ? colors.primary : i === nearest ? colors.foreground : colors.border),
-            ),
+                .h_full()
+                .justify_end()
+                .cursor_pointer()
+                .on_click((_event, cx) => {
+                  this.picked.set(key, p.value);
+                  cx.notify();
+                })
+                .child(
+                  div()
+                    .w_full()
+                    .h(high > low ? 4 + Math.round(((p.cost - low) / (high - low)) * 36) : 4)
+                    .rounded(1)
+                    .bg(color)
+                    .opacity(opacity),
+                );
+            }),
           ),
       )
       .child(
@@ -416,6 +459,16 @@ export default class CompactionTune extends View {
 
 function cardKey(group, entry) {
   return `${group.agent}-${entry.model}`;
+}
+
+/// 曲线下面的图例：深浅两段各是哪一截。
+function regionText(entry) {
+  const parts = regions(entry.advice.curve).map(
+    (r) =>
+      `${r.tolerance === REGION_TOLERANCES[0] ? "深色" : "浅色"}是比最省多花不到 ${formatPercent(r.tolerance)}` +
+      `（${formatTokens(r.from - entry.reserve)}–${formatTokens(r.to - entry.reserve)} 压缩）`,
+  );
+  return `${parts.join("，")}。点柱子选压缩点：越往右压缩越少，丢的上下文越少。`;
 }
 
 function facts(entry, advice) {

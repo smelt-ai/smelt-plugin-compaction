@@ -49,3 +49,19 @@ export function formatSeconds(seconds) {
 export function savings(advice) {
   return advice.cost > 0 ? (advice.cost - advice.low) / advice.cost : 0;
 }
+
+/** 曲线上画出来的两段：比最省多花不到 5%、不到 10%。 */
+export const REGION_TOLERANCES = [0.05, 0.1];
+
+/**
+ * 每个容忍度下，成本不超过「最省 × (1 + 容忍度)」的候选点从哪到哪（设定值）。
+ * 谷底附近通常是连着的一段；万一断开，也取最两头。
+ */
+export function regions(curve, tolerances = REGION_TOLERANCES) {
+  if (curve.length === 0) return [];
+  const low = Math.min(...curve.map((p) => p.cost));
+  return tolerances.map((tolerance) => {
+    const inside = curve.filter((p) => p.cost <= low * (1 + tolerance)).map((p) => p.value);
+    return { tolerance, from: Math.min(...inside), to: Math.max(...inside) };
+  });
+}
