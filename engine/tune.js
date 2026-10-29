@@ -112,9 +112,29 @@ export function observe(ss) {
   return facts;
 }
 
-/** 对话开头的提示词（系统提示、工具），压缩会保留它。 */
-function base(ss) {
-  return median(ss.map((s) => s[0].prompt));
+/**
+ * 对话开头的提示词（系统提示、工具），压缩会保留它。只看真正从第一次调用开始的对话
+ * （`seq` 是 0，没有 `seq` 的也算）：中途换到这个模型的对话，第一次调用已经带着很长的上下文。
+ * 一段都没有时用 `fallback`（同一个 agent 别的模型的开头）。
+ */
+function base(ss, fallback) {
+  const starts = ss.filter((s) => !(s[0].seq > 0)).map((s) => s[0].prompt);
+  if (starts.length > 0) return median(starts);
+  return fallback > 0 ? fallback : median(ss.map((s) => s[0].prompt));
+}
+
+/**
+ * 跨文件去重：回退、分叉会把整段历史复制进新的会话文件，同一次调用出现好几遍。时间、
+ * 提示词、输出都一样就当同一次，留先出现的（调用方按文件、文件内顺序给）。
+ */
+export function dedupe(calls) {
+  const seen = new Set();
+  return calls.filter((call) => {
+    const key = `${call.time}:${call.prompt}:${call.out}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 /** 压缩让人等的秒数中位数，和量到了几次；量到的少于 MIN_TIMED 次时是 0。 */
@@ -170,6 +190,7 @@ function roundUp(value, step) {
  * - `current`：现在的设定，0 表示没设，从这个人的压缩里推
  * - `window`：模型的窗口，设定不能超过它；0 表示不知道
  * - `weights`：各类 token 的折算；不给就按模型名猜
+ * - `base`：这个模型没有从头开始的对话时，拿来当开头的值
  */
 export function advise(calls, opts) {
   const ss = streams(calls);
@@ -186,9 +207,13 @@ export function advise(calls, opts) {
   facts.hour = wrote > 0 ? wrote1h / wrote : 0;
   if (facts.hour > 0.5) write = w.write1h;
 
-  const b = base(ss);
+  const b = base(ss, opts.base);
+  facts.base = b;
   const after = facts.after || b + ASSUMED_SUMMARY;
   const rework = facts.compacts < MIN_OBSERVED_COMPACTS ? Math.max(facts.rework, ASSUMED_REWORK) : facts.rework;
+  // 重放实际用的值。见过的压缩太少时它们是估的，界面要说明。
+  facts.afterUsed = after;
+  facts.reworkUsed = rework;
   const reserve = opts.reserve ?? 0;
 
   let current = opts.current ?? 0;

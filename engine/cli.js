@@ -12,7 +12,7 @@
 import { mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { advise } from "./tune.js";
+import { advise, dedupe, median } from "./tune.js";
 import { AGENTS, agentById } from "./agents.js";
 import { CLAUDE_ENV } from "./claude.js";
 import { openStore } from "./store.js";
@@ -152,7 +152,10 @@ function groupByModel(calls) {
 
 async function analyzeAgent(store, agent, ctx) {
   const scanned = await scan(store, agent, ctx.home);
-  const byModel = groupByModel(store.calls(agent.id));
+  const calls = dedupe(store.calls(agent.id));
+  // 中途换过模型的对话不知道开头多长，拿这个 agent 所有对话的开头来补。
+  const agentBase = median(calls.filter((call) => call.seq === 0).map((call) => call.prompt));
+  const byModel = groupByModel(calls);
   if (byModel.size === 0) {
     return { agent: agent.id, label: agent.label, files: scanned.files, filesRead: scanned.read, models: [] };
   }
@@ -178,7 +181,16 @@ async function analyzeAgent(store, agent, ctx) {
         window: null,
         reserve: agent.reserve,
         current: null,
-        advice: advise(calls, { min: 50_000, max: 1_000_000, step: 10_000, reserve: agent.reserve, current: 0, window: 0, weights }),
+        advice: advise(calls, {
+          min: 50_000,
+          max: 1_000_000,
+          step: 10_000,
+          reserve: agent.reserve,
+          current: 0,
+          window: 0,
+          weights,
+          base: agentBase,
+        }),
       };
     }
     const current = agent.current(settings, model, win.window, row, ctx);
@@ -190,7 +202,7 @@ async function analyzeAgent(store, agent, ctx) {
       reserve: agent.reserve,
       current,
       appliedAt: row?.appliedAt ?? null,
-      advice: advise(calls, { ...agent.tune(win.window), current: current.value, weights }),
+      advice: advise(calls, { ...agent.tune(win.window), current: current.value, weights, base: agentBase }),
     };
   });
   return {

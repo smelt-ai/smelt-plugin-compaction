@@ -92,7 +92,7 @@ export function openStore(path) {
   const deleteFile = db.query("DELETE FROM files WHERE path = ?");
   const agentFiles = db.query("SELECT path FROM files WHERE agent = ?");
   const agentCalls = db.query(
-    `SELECT calls.path, ${CALL_COLUMNS.map((c) => `calls.${c}`).join(", ")} FROM calls ` +
+    `SELECT calls.path, calls.seq, ${CALL_COLUMNS.map((c) => `calls.${c}`).join(", ")} FROM calls ` +
       "JOIN files ON files.path = calls.path WHERE files.agent = ? ORDER BY calls.path, calls.seq",
   );
   const appliedOf = db.query("SELECT value, applied_at FROM applied WHERE agent = ? AND model = ?");
@@ -143,10 +143,11 @@ export function openStore(path) {
       }
     }),
 
-    /** 这个 agent 缓存里的全部调用，形状同 pi.js 读出来的。 */
+    /** 这个 agent 缓存里的全部调用，按文件、文件内顺序排；形状同 pi.js 读出来的，另带 `seq`。 */
     calls(agent) {
       return agentCalls.all(agent).map((row) => ({
         stream: row.path,
+        seq: row.seq,
         time: row.time,
         model: row.model,
         prompt: row.prompt,

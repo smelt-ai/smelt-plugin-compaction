@@ -317,6 +317,18 @@ export default class CompactionTune extends View {
     }
     lines.push(this.curve(entry, cx));
     lines.push(hint(facts(entry, advice), cx));
+    if (advice.facts.compacts === 0) {
+      lines.push(
+        hint(
+          `这个模型在你的记录里还没压缩过：压缩后剩多少（按对话开头加 1 万，约 ${formatTokens(advice.facts.afterUsed)}）` +
+            `和返工（按 ${formatTokens(advice.facts.reworkUsed)}）都是估的，「省多少」只能参考。`,
+          cx,
+        ),
+      );
+    }
+    if (changed && advice.best === advice.curve[0].value) {
+      lines.push(hint("建议已经是可试范围的最低处：再低，压缩完剩下的上下文离压缩点太近，很快又要压。", cx));
+    }
 
     const source = entry.current?.source;
     const actions = [];

@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { advise, median, observe, replay, streams, DEFAULT_WEIGHTS, MIN_CALLS } from "../engine/tune.js";
+import { advise, dedupe, median, observe, replay, streams, DEFAULT_WEIGHTS, MIN_CALLS } from "../engine/tune.js";
 
 /** 一段对话：从 `start` 起每次调用涨 `growth`，`cutAt` 里的下标之前刚压缩过、回到 `after`。 */
 function conversation(stream, { calls, start, growth, out = 500, cutAt = [], after = 0, t0 = 0 }) {
@@ -106,4 +106,40 @@ test("设定超过窗口按窗口算", () => {
   const advice = advise(calls, opts({ current: 2_000_000, window: 183_616, max: 183_616 }));
   assert.equal(advice.current, 183_616);
   assert.ok(advice.curve.every((p) => p.value <= 183_616));
+});
+
+test("分叉复制的历史只算一次，留先出现的", () => {
+  const original = conversation("a", { calls: 3, start: 10_000, growth: 1_000 });
+  const copy = original.map((call) => ({ ...call, stream: "b" }));
+  const tail = { ...original[2], stream: "b", time: 9_999, prompt: 50_000 };
+  const kept = dedupe([...original, ...copy, tail]);
+  assert.deepEqual(
+    kept.map((call) => `${call.stream}${call.prompt}`),
+    ["a10000", "a11000", "a12000", "b50000"],
+  );
+});
+
+test("中途换到这个模型的对话不拿来算开头，用 agent 的开头补", () => {
+  // 两段对话都在第 600 次调用、上下文 11.5 万时才换到这个模型。
+  const calls = [];
+  for (let i = 0; i < 2; i++) {
+    const list = conversation(`s${i}`, { calls: 100, start: 115_000, growth: 5_000, t0: i * 1e6 });
+    list.forEach((call, j) => (call.seq = 600 + j));
+    calls.push(...list);
+  }
+  const guessed = advise(calls, opts({ current: 983_616 }));
+  const based = advise(calls, opts({ current: 983_616, base: 20_000 }));
+  assert.equal(guessed.facts.base, 115_000, "没有补的值时只能用中途的第一次");
+  assert.equal(based.facts.base, 20_000);
+  assert.equal(based.facts.afterUsed, 30_000);
+  assert.ok(based.curve[0].value < guessed.curve[0].value);
+});
+
+test("从头开始的对话优先：seq 为 0 的才算开头", () => {
+  const head = conversation("a", { calls: 60, start: 8_000, growth: 1_000 });
+  head.forEach((call, j) => (call.seq = j));
+  const mid = conversation("b", { calls: 60, start: 200_000, growth: 1_000, t0: 1e6 });
+  mid.forEach((call, j) => (call.seq = 300 + j));
+  const advice = advise([...head, ...mid], opts({ current: 983_616, base: 99_999 }));
+  assert.equal(advice.facts.base, 8_000);
 });
