@@ -1,9 +1,9 @@
 // 引擎入口。插件的脚本跑在 UI 线程上，几百 MB 的会话文件不能在那里读，所以由插件起一个
-// 子进程跑这里：smelt 自带的 smelt-pi 是 Bun 编出来的，带上 `BUN_BE_BUN=1` 就是一个 Bun。
+// 子进程跑这里：smelt 自带的 smelt-agent（改名前叫 smelt-pi）是 Bun 编出来的，带上 `BUN_BE_BUN=1` 就是一个 Bun。
 //
-//   BUN_BE_BUN=1 ~/.smelt/bin/smelt-pi engine/cli.js analyze --home ~ --smelt-pi ~/.smelt/bin/smelt-pi
-//   BUN_BE_BUN=1 ~/.smelt/bin/smelt-pi engine/cli.js apply --home ~ --agent pi --model p/m --value 256000 --window 1000000
-//   BUN_BE_BUN=1 ~/.smelt/bin/smelt-pi engine/cli.js undo --home ~ --agent pi --model p/m
+//   BUN_BE_BUN=1 ~/.smelt/bin/smelt-agent engine/cli.js analyze --home ~ --agent-bin ~/.smelt/bin/smelt-agent
+//   BUN_BE_BUN=1 ~/.smelt/bin/smelt-agent engine/cli.js apply --home ~ --agent pi --model p/m --value 256000 --window 1000000
+//   BUN_BE_BUN=1 ~/.smelt/bin/smelt-agent engine/cli.js undo --home ~ --agent pi --model p/m
 //
 // 子进程的环境变量是空的，主目录这些都从参数传；插件看得到的 CLAUDE_CODE_AUTO_COMPACT_WINDOW
 // 用 `--claude-env` 传进来。stdout 每行一个 JSON：
@@ -18,7 +18,7 @@ import { CLAUDE_ENV } from "./claude.js";
 import { openStore } from "./store.js";
 
 const PLUGIN_ID = "com.smelt.compaction-tune";
-/** smelt-pi 和守护的握手版本。猜错了它会在 stderr 说自己是几，照着再跑一次。 */
+/** smelt-agent 和守护的握手版本。猜错了它会在 stderr 说自己是几，照着再跑一次。 */
 const PROTOCOL_GUESS = "1";
 const LIST_MODELS_TIMEOUT_MS = 60_000;
 /** Pi 的设置锁（proper-lockfile）：锁目录超过这么久没更新就算死锁。 */
@@ -116,8 +116,8 @@ async function scan(store, agent, home) {
   return { files: files.length, read };
 }
 
-async function runListModels(home, smeltPi, protocol) {
-  const child = Bun.spawn([smeltPi, "--list-models"], {
+async function runListModels(home, agentBin, protocol) {
+  const child = Bun.spawn([agentBin, "--list-models"], {
     env: { HOME: home, USERPROFILE: home, SMELT_PI_PROTOCOL: protocol },
     stdin: "ignore",
     stdout: "pipe",
@@ -128,14 +128,15 @@ async function runListModels(home, smeltPi, protocol) {
   return { code: await child.exited, out, err };
 }
 
-/** `smelt-pi --list-models` 的输出；失败时 `{ error }`。 */
-async function listPiModels(home, smeltPi) {
-  if (!smeltPi) return { error: "没有给 --smelt-pi" };
-  let result = await runListModels(home, smeltPi, PROTOCOL_GUESS);
-  const own = /smelt-pi 的协议是 (\d+)/.exec(result.err);
-  if (result.code !== 0 && own) result = await runListModels(home, smeltPi, own[1]);
+/** `smelt-agent --list-models` 的输出；失败时 `{ error }`。 */
+async function listPiModels(home, agentBin) {
+  if (!agentBin) return { error: "没有给 --agent-bin" };
+  let result = await runListModels(home, agentBin, PROTOCOL_GUESS);
+  // 改名前的 smelt 报的是「smelt-pi 的协议是」。
+  const own = /smelt-(?:agent|pi) 的协议是 (\d+)/.exec(result.err);
+  if (result.code !== 0 && own) result = await runListModels(home, agentBin, own[1]);
   if (result.code !== 0) {
-    return { error: `smelt-pi --list-models 失败：${result.err.trim() || `退出码 ${result.code}`}` };
+    return { error: `${agentBin} --list-models 失败：${result.err.trim() || `退出码 ${result.code}`}` };
   }
   return { text: result.out };
 }
@@ -231,7 +232,7 @@ async function analyze(flags) {
     home: flags.home,
     env: flags["claude-env"] ? { [CLAUDE_ENV]: flags["claude-env"] } : {},
     readJson,
-    listPiModels: () => listPiModels(flags.home, flags["smelt-pi"]),
+    listPiModels: () => listPiModels(flags.home, flags["agent-bin"]),
   };
   try {
     const agents = [];

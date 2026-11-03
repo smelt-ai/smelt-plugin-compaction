@@ -1,6 +1,6 @@
 // 「压缩调优」：按你自己的用法，给 Pi、Claude Code 的每个模型算出最省的自动压缩点。
 //
-// 读会话、重放这些重活在子进程里做（engine/cli.js，跑在 smelt 自带的 smelt-pi 里，它是
+// 读会话、重放这些重活在子进程里做（engine/cli.js，跑在 smelt 自带的 smelt-agent 里，它是
 // Bun 编出来的，带上 `BUN_BE_BUN=1` 就是一个 Bun），这里只起进程、读它一行行吐出来的
 // JSON、画结果。插件脚本跑在 UI 线程上，几百 MB 的会话文件不能在这里读。
 //
@@ -56,24 +56,30 @@ export default class CompactionTune extends View {
     this.analyze(cx);
   }
 
-  smeltPi() {
-    return join(this.home, ".smelt", "bin", "smelt-pi");
+  /// smelt 自带的 Bun 编译产物。改名前叫 smelt-pi，没升级的 smelt 上还是这个名字。
+  async agentBinary() {
+    for (const name of ["smelt-agent", "smelt-pi"]) {
+      const path = join(this.home, ".smelt", "bin", name);
+      try {
+        await stat(path);
+        return path;
+      } catch {}
+    }
+    return null;
   }
 
   /// 起引擎子进程。`onEvent(event, cx)` 收每一行事件；结束时返回错误说明，没出错是 null。
   async engine(args, onEvent) {
-    const smeltPi = this.smeltPi();
-    try {
-      await stat(smeltPi);
-    } catch {
-      return `找不到 ${smeltPi}：先在 smelt 里开一次 Pi 对话，让它装好 Pi 运行时`;
+    const agent = await this.agentBinary();
+    if (agent === null) {
+      return `找不到 ${join(this.home, ".smelt", "bin", "smelt-agent")}：先在 smelt 里开一次 Pi 对话，让它装好 Pi 运行时`;
     }
     const cli = decodeURIComponent(new URL("./engine/cli.js", import.meta.url).pathname);
     return new Promise((resolve) => {
       let failure = null;
       const stderr = [];
       // 子进程的环境变量是空的，用 env 补上 BUN_BE_BUN，主目录从参数传。
-      const child = process.spawn("/usr/bin/env", ["BUN_BE_BUN=1", smeltPi, cli, ...args, "--home", this.home], {
+      const child = process.spawn("/usr/bin/env", ["BUN_BE_BUN=1", agent, cli, ...args, "--home", this.home, "--agent-bin", agent], {
         lines: true,
       });
       child.on("stdout", (line, cx) => {
@@ -107,7 +113,7 @@ export default class CompactionTune extends View {
       return;
     }
     this.progress = "正在启动…";
-    const args = ["analyze", "--smelt-pi", this.smeltPi()];
+    const args = ["analyze"];
     // 引擎看不到环境变量；smelt 带着这个变量启动的话，终端里的 Claude Code 也会继承它。
     if (process.env[CLAUDE_ENV]) args.push("--claude-env", process.env[CLAUDE_ENV]);
     cx.spawn(async (cx) => {
