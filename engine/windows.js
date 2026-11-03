@@ -1,5 +1,5 @@
 // Pi 各模型的上下文窗口。Pi 判断压缩用的就是它目录里的窗口，所以以 Pi 说的为准：
-// - `smelt-pi --list-models` 列出能用的模型，窗口写成 `200K`、`1M`、`1.1M` 这种；
+// - `smelt-agent --list-models` 列出能用的模型，窗口写成 `200K`、`1M`、`1.1M` 这种；
 // - `~/.pi/agent/models.json` 里自己加的模型有精确的 `contextWindow`，有就用它。
 //
 // 只用纯 JavaScript，Node 和 Bun 都能跑。

@@ -151,15 +151,15 @@ Pi 的会话记了每次调用的费用，所以 Pi 按这个模型实际的价�
 
 ## 怎么跑的
 
-插件脚本跑在 smelt 的 UI 线程上，几百 MB 的会话文件不能在那里读。重活在子进程里做：smelt 自带的 `~/.smelt/bin/smelt-pi` 是 Bun 编出来的，带上 `BUN_BE_BUN=1` 就是一个 Bun，插件用它跑 `engine/cli.js`，读它一行行输出的 JSON。不需要另装 Node 或 Bun。
+插件脚本跑在 smelt 的 UI 线程上，几百 MB 的会话文件不能在那里读。重活在子进程里做：smelt 自带的 `~/.smelt/bin/smelt-agent`（改名前叫 `smelt-pi`，插件两个都认）是 Bun 编出来的，带上 `BUN_BE_BUN=1` 就是一个 Bun，插件用它跑 `engine/cli.js`，读它一行行输出的 JSON。不需要另装 Node 或 Bun。
 
-Pi 各模型的窗口取自 `smelt-pi --list-models`（Pi 判断压缩用的就是这份），`~/.pi/agent/models.json` 里有精确 `contextWindow` 的以它为准。
+Pi 各模型的窗口取自 `smelt-agent --list-models`（Pi 判断压缩用的就是这份），`~/.pi/agent/models.json` 里有精确 `contextWindow` 的以它为准。
 
 插件自己的数据在 `~/.smelt/plugin-data/com.smelt.compaction-tune/state.sqlite3`：每个会话文件读出的调用（大小和修改时间没变就不重读），和插件写过哪些设置。
 
 ## 安装
 
-需要带「面板插件」设置页的 smelt，用过 Pi（`~/.smelt/bin/smelt-pi` 已经装好，引擎靠它跑）。暂时只支持 macOS 和 Linux。
+需要带「面板插件」设置页的 smelt，用过 Pi（`~/.smelt/bin/smelt-agent` 已经装好，引擎靠它跑）。暂时只支持 macOS 和 Linux。
 
 ```bash
 git clone https://github.com/smelt-ai/smelt-plugin-compaction
@@ -195,7 +195,7 @@ node --test tests/
 单独跑引擎：
 
 ```bash
-BUN_BE_BUN=1 ~/.smelt/bin/smelt-pi engine/cli.js analyze --home ~ --smelt-pi ~/.smelt/bin/smelt-pi
+BUN_BE_BUN=1 ~/.smelt/bin/smelt-agent engine/cli.js analyze --home ~ --agent-bin ~/.smelt/bin/smelt-agent
 ```
 
 插件的 `console.log` 和脚本错误写在 `~/.smelt/app.log`，带 `[plugin]` 标记。
