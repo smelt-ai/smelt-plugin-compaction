@@ -59,6 +59,8 @@ export function piReader(stream) {
       wrote1h: 0,
       cut,
       compactMs: cut ? compactMs : 0,
+      // Pi 的会话不记压缩是手动还是自动的。
+      trigger: "",
       input,
       cacheRead,
       costInput: cost.input ?? 0,

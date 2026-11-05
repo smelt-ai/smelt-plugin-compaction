@@ -3,7 +3,9 @@
 //
 // 一次回复按内容块拆成几行写，每行带同一个 `requestId` 和同一份 usage，只算一次。
 // 压缩是一条 `{"type":"system","subtype":"compact_boundary"}`，`compactMetadata.durationMs`
-// 是这次压缩让人等了多久。
+// 是这次压缩让人等了多久，`compactMetadata.trigger` 是 `manual`（/compact）或 `auto`。`auto`
+// 里还混着空闲压缩：人走开、缓存快过期时提前压，后面跟一条「Compacted while idle」的提示。
+// 只有剩下的那种是到了压缩点才压的。
 //
 // 压缩点：Claude Code 在 `autoCompactWindow`（和模型窗口取小）再减去给回复留的空时压缩，
 // 200K 的窗口约在 167K、1M 约在 967K。按模型的值写在 `modelSettings.<模型名>.autoCompactWindow`，
@@ -20,6 +22,8 @@ export const CLAUDE_MAX_WINDOW = 1_000_000;
 const STANDARD_WINDOW = 200_000;
 const LONG_WINDOW = 1_000_000;
 export const CLAUDE_ENV = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
+/** 空闲压缩后 Claude Code 写的提示。 */
+const IDLE_NOTICE = "Compacted while idle";
 
 /** `claude-haiku-4-5-20251001`、`claude-opus-5-5[1m]` → 设置里认的规范名。 */
 export function canonicalClaudeModel(model) {
@@ -29,10 +33,16 @@ export function canonicalClaudeModel(model) {
 export function claudeReader(stream) {
   let cut = false;
   let compactMs = 0;
+  /** 刚才那次压缩怎么触发的：`auto`、`manual`、`idle`。 */
+  let trigger = "";
   /** requestId → 已经算过的那次调用。后面同一次回复的行只补上输出数。 */
   const seen = new Map();
   return (line) => {
     const isBoundary = line.includes('"compact_boundary"');
+    if (cut && line.includes(IDLE_NOTICE) && line.includes('"type":"system"')) {
+      trigger = "idle";
+      return null;
+    }
     if (!isBoundary && !(line.includes('"type":"assistant"') && line.includes('"usage"'))) return null;
     let entry;
     try {
@@ -44,6 +54,7 @@ export function claudeReader(stream) {
       cut = true;
       const ms = entry.compactMetadata?.durationMs;
       compactMs = Number.isFinite(ms) && ms > 0 ? ms : 0;
+      trigger = entry.compactMetadata?.trigger === "manual" ? "manual" : "auto";
       return null;
     }
     const message = entry.type === "assistant" ? entry.message : null;
@@ -71,6 +82,7 @@ export function claudeReader(stream) {
       wrote1h: usage.cache_creation?.ephemeral_1h_input_tokens ?? 0,
       cut,
       compactMs: cut ? compactMs : 0,
+      trigger: cut ? trigger : "",
       input,
       cacheRead,
       // 会话里没有费用，按 Anthropic 的价钱比例折算（tune.js 的 weightsFor）。
@@ -82,6 +94,7 @@ export function claudeReader(stream) {
     if (id !== null) seen.set(id, call);
     cut = false;
     compactMs = 0;
+    trigger = "";
     return call;
   };
 }

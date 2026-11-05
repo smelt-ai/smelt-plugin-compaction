@@ -307,8 +307,8 @@ export default class CompactionTune extends View {
     if (now !== null) {
       const source = entry.current
         ? sourceLabel(group.agent, entry.current.source)
-        : advice.facts.compacts >= 3
-          ? "按你的压缩记录推算"
+        : advice.facts.autoCompacts >= 3
+          ? "按你到点自动压缩的记录推算"
           : "不知道窗口，按 100 万算";
       lines.push(line("现在", `${known === null ? "约 " : ""}${formatTokens(now)} 时压缩`, source, cx));
     }
@@ -481,7 +481,8 @@ function facts(entry, advice) {
   const f = advice.facts;
   const parts = [`${entry.calls} 次调用、${f.streams} 段对话`];
   if (f.compacts > 0) {
-    parts.push(`压缩过 ${f.compacts} 次，压缩前中位 ${formatTokens(f.peak)}、压缩后 ${formatTokens(f.after)}`);
+    const auto = f.autoCompacts < f.compacts ? `（到压缩点自动压的 ${f.autoCompacts} 次）` : "";
+    parts.push(`压缩过 ${f.compacts} 次${auto}，压缩前中位 ${formatTokens(f.peak)}、压缩后 ${formatTokens(f.after)}`);
     parts.push(`压缩后多读回 ${formatTokens(f.rework)}`);
   }
   if (f.took > 0) parts.push(`一次压缩中位等 ${formatSeconds(f.took)}`);

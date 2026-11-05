@@ -68,7 +68,41 @@ test("压缩边界之后的第一次调用标上 cut，耗时取 durationMs", ()
   const after = read(assistant({ requestId: "r2", time: 60_000 }));
   assert.equal(after.cut, true);
   assert.equal(after.compactMs, 50_758);
+  assert.equal(after.trigger, "auto");
   assert.equal(read(assistant({ requestId: "r3", time: 61_000 })).cut, false);
+});
+
+function boundary(trigger) {
+  return JSON.stringify({
+    type: "system",
+    subtype: "compact_boundary",
+    timestamp: new Date(2_000).toISOString(),
+    compactMetadata: { trigger, preTokens: 200_000, durationMs: 40_000 },
+  });
+}
+
+test("手动 /compact 记成 manual，空闲时提前压的记成 idle", () => {
+  const read = claudeReader("s.jsonl");
+  read(boundary("manual"));
+  assert.equal(read(assistant({ requestId: "r1", time: 3_000 })).trigger, "manual");
+
+  read(boundary("auto"));
+  const notice = JSON.stringify({
+    type: "system",
+    subtype: "informational",
+    content: 'Compacted while idle, before the prompt cache expired · turn off with "idleCompaction": false in settings.json',
+    level: "notice",
+  });
+  assert.equal(read(notice), null);
+  const idle = read(assistant({ requestId: "r2", time: 4_000 }));
+  assert.equal(idle.cut, true);
+  assert.equal(idle.trigger, "idle");
+
+  // 没压缩时出现的同样字样不改任何东西。
+  read(notice);
+  const plain = read(assistant({ requestId: "r3", time: 5_000 }));
+  assert.equal(plain.cut, false);
+  assert.equal(plain.trigger, "");
 });
 
 test("合成的回复、用户行跳过", () => {

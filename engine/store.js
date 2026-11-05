@@ -9,7 +9,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-const SCHEMA = 1;
+const SCHEMA = 2;
 
 const CALL_COLUMNS = [
   "time",
@@ -20,6 +20,7 @@ const CALL_COLUMNS = [
   "wrote1h",
   "cut",
   "compact_ms",
+  "trigger",
   "input",
   "cache_read",
   "cost_input",
@@ -57,6 +58,7 @@ export function openStore(path) {
           wrote1h INTEGER NOT NULL,
           cut INTEGER NOT NULL,
           compact_ms INTEGER NOT NULL,
+          trigger TEXT NOT NULL DEFAULT '',
           input INTEGER NOT NULL,
           cache_read INTEGER NOT NULL,
           cost_input REAL NOT NULL,
@@ -72,7 +74,17 @@ export function openStore(path) {
           applied_at INTEGER NOT NULL,
           PRIMARY KEY (agent, model)
         );
-        PRAGMA user_version = 1;
+        PRAGMA user_version = 2;
+      `);
+    })();
+  } else if (version < 2) {
+    // 加了压缩的触发方式。calls 只是会话文件的缓存，清掉让它重读。
+    db.transaction(() => {
+      db.exec(`
+        DELETE FROM calls;
+        DELETE FROM files;
+        ALTER TABLE calls ADD COLUMN trigger TEXT NOT NULL DEFAULT '';
+        PRAGMA user_version = 2;
       `);
     })();
   }
@@ -126,6 +138,7 @@ export function openStore(path) {
           call.wrote1h,
           call.cut ? 1 : 0,
           call.compactMs,
+          call.trigger ?? "",
           call.input,
           call.cacheRead,
           call.costInput,
@@ -156,6 +169,7 @@ export function openStore(path) {
         wrote1h: row.wrote1h,
         cut: row.cut === 1,
         compactMs: row.compact_ms,
+        trigger: row.trigger,
         input: row.input,
         cacheRead: row.cache_read,
         costInput: row.cost_input,

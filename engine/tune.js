@@ -21,8 +21,10 @@
  * - `wrote` / `wrote1h`：其中写进缓存的，和其中保留一小时的
  * - `cut`：这次调用之前刚压缩过
  * - `compactMs`：那次压缩让人等了多久，量不到是 0
+ * - `trigger`：那次压缩怎么触发的：`auto`（到了压缩点）、`manual`（人手动压的）、`idle`
+ *   （空闲时提前压的）；读不出来是空串，当作 `auto`
  * @typedef {{ time: number, stream: string, prompt: number, out: number, wrote: number,
- *   wrote1h: number, cut: boolean, compactMs: number }} Call
+ *   wrote1h: number, cut: boolean, compactMs: number, trigger?: string }} Call
  */
 
 /** 各类 token 折成普通输入 token 的倍数。 */
@@ -39,7 +41,7 @@ export const MIN_CALLS = 50;
 const REWORK_CALLS = 10;
 /** 至少这么多次压缩量到了耗时，才把等待算进去。 */
 const MIN_TIMED = 3;
-/** 成本差在这个比例以内算一样：省不到这么多不建议改；有耗时时，在这个范围里挑压缩最少的。 */
+/** 成本差在这个比例以内算一样：省不到这么多不建议改。 */
 const SAME_COST = 0.03;
 /** 在最便宜的 1% 以内取最大的点：压缩越少，丢掉的越少。 */
 const NEAR_LOWEST = 0.01;
@@ -51,6 +53,11 @@ const MIN_OBSERVED_COMPACTS = 5;
 
 export function weightsFor(model) {
   return /(^|\/)claude/i.test(model) ? ANTHROPIC_WEIGHTS : DEFAULT_WEIGHTS;
+}
+
+/** 这次压缩是到了压缩点才压的：手动、空闲时的压缩和压缩点无关。 */
+function atThreshold(call) {
+  return call.trigger !== "manual" && call.trigger !== "idle";
 }
 
 export function median(xs) {
@@ -70,10 +77,25 @@ export function streams(calls) {
   return [...by.keys()].sort().map((key) => by.get(key).sort((a, b) => a.time - b.time));
 }
 
-/** 从这个人自己的调用里读出：对话怎么长、压缩前多长、压缩后剩多少、返工多少。 */
+/**
+ * 从这个人自己的调用里读出：对话怎么长、压缩前多长、压缩后剩多少、返工多少。
+ * `autoCompacts` / `autoPeak` 只数到了压缩点才压的那些，拿来推现在的压缩点。
+ */
 export function observe(ss) {
-  const facts = { calls: 0, streams: 0, compacts: 0, peak: 0, after: 0, growth: 0, rework: 0, sessions: 0 };
+  const facts = {
+    calls: 0,
+    streams: 0,
+    compacts: 0,
+    peak: 0,
+    autoCompacts: 0,
+    autoPeak: 0,
+    after: 0,
+    growth: 0,
+    rework: 0,
+    sessions: 0,
+  };
   const peaks = [];
+  const autoPeaks = [];
   const afters = [];
   const growths = [];
   const reworks = [];
@@ -85,6 +107,7 @@ export function observe(ss) {
     for (let i = 1; i < s.length; i++) {
       if (s[i].cut) {
         peaks.push(s[i - 1].prompt);
+        if (atThreshold(s[i])) autoPeaks.push(s[i - 1].prompt);
         afters.push(s[i].prompt);
         cuts.push(i);
         continue;
@@ -108,6 +131,8 @@ export function observe(ss) {
   }
   facts.compacts = peaks.length;
   facts.peak = median(peaks);
+  facts.autoCompacts = autoPeaks.length;
+  facts.autoPeak = median(autoPeaks);
   facts.after = median(afters);
   facts.growth = median(growths);
   facts.rework = median(reworks);
@@ -198,7 +223,7 @@ function roundUp(value, step) {
  * `opts`：
  * - `min` / `max` / `step`：候选范围
  * - `reserve`：agent 在设定值下面再留出的空，压缩实际发生在 设定值 − reserve
- * - `current`：现在的设定，0 表示没设，从这个人的压缩里推
+ * - `current`：现在的设定，0 表示没设，从这个人到了压缩点的压缩里推
  * - `window`：模型的窗口，设定不能超过它；0 表示不知道
  * - `weights`：各类 token 的折算；不给就按模型名猜
  * - `base`：这个模型没有从头开始的对话时，拿来当开头的值
@@ -242,7 +267,7 @@ export function advise(calls, opts) {
 
   let current = opts.current ?? 0;
   if (current === 0) {
-    if (facts.compacts >= 3) current = roundTo(facts.peak + reserve, opts.step);
+    if (facts.autoCompacts >= 3) current = roundTo(facts.autoPeak + reserve, opts.step);
     else if (opts.window > 0) current = opts.window;
     else current = opts.max;
   }
@@ -269,6 +294,8 @@ export function advise(calls, opts) {
   for (let value = floor; value <= top; value += opts.step) curve.push(run(value));
   if (curve.length === 0) return null;
 
+  // 「最省」就是曲线上最便宜的那段：token 和等待的秒没有共同单位，不拿猜的汇率去换，
+  // 要多压缩几次、多等多久由界面摆出来，让人自己权衡。
   const low = curve.reduce((a, p) => (p.cost < a.cost ? p : a));
   let best = low;
   for (const p of curve) {
@@ -281,26 +308,6 @@ export function advise(calls, opts) {
     curve,
     wait: now.wait,
   };
-  // 量到了压缩耗时，就不让人等得比现在久：token 和秒没有共同单位，不拿猜的汇率去换。
-  // 压缩不比现在频繁的点里取最便宜的；和它差不到 SAME_COST 的，取压缩最少、一样多时取大的。
-  if (facts.took > 0) {
-    const calm = curve.filter((p) => p.compacts <= now.compacts);
-    best = now;
-    if (calm.length > 0) {
-      const cheapest = calm.reduce((a, p) => (p.cost < a.cost ? p : a));
-      best = cheapest;
-      for (const p of calm) {
-        if (
-          p.cost <= cheapest.cost * (1 + SAME_COST) &&
-          (p.compacts < best.compacts || (p.compacts === best.compacts && p.value > best.value))
-        ) {
-          best = p;
-        }
-      }
-    }
-    result.cheapest = low.value;
-    result.waitCheapest = low.wait;
-  }
   result.compacts = now.compacts;
   result.best = best.value;
   result.low = best.cost;

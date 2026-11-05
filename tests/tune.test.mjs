@@ -89,6 +89,51 @@ test("一路涨到快满的对话：建议比默认的 98% 早得多地压缩", 
   assert.ok(advice.compactsBest > advice.compacts);
 });
 
+test("推现在的压缩点只看到点自动压的，手动、空闲压缩不算", () => {
+  const calls = [];
+  for (let i = 0; i < 6; i++) {
+    // 每段对话在 25 万左右手动压一次
+    const list = conversation(`m${i}`, { calls: 60, start: 20_000, growth: 4_000, cutAt: [58], after: 40_000, t0: i * 1e6 });
+    list[58].trigger = "manual";
+    calls.push(...list);
+  }
+  for (let i = 0; i < 2; i++) {
+    const list = conversation(`i${i}`, { calls: 60, start: 20_000, growth: 4_000, cutAt: [40], after: 40_000, t0: (10 + i) * 1e6 });
+    list[40].trigger = "idle";
+    calls.push(...list);
+  }
+  const advice = advise(calls, opts({ current: 0 }));
+  assert.equal(advice.facts.compacts, 8);
+  assert.equal(advice.facts.autoCompacts, 0);
+  assert.equal(advice.current, 983_616, "到点压缩不够 3 次，按窗口算");
+
+  for (let i = 0; i < 3; i++) {
+    const list = conversation(`a${i}`, { calls: 60, start: 20_000, growth: 5_000, cutAt: [50], after: 40_000, t0: (20 + i) * 1e6 });
+    list[50].trigger = "auto";
+    calls.push(...list);
+  }
+  const inferred = advise(calls, opts({ current: 0 }));
+  assert.equal(inferred.facts.autoCompacts, 3);
+  assert.equal(inferred.facts.autoPeak, 265_000);
+  assert.equal(inferred.current, 270_000);
+});
+
+test("量到了压缩耗时，最省的仍是曲线上最便宜的点，哪怕要多压缩几次", () => {
+  const calls = [];
+  for (let i = 0; i < 10; i++) {
+    const list = conversation(`s${i}`, { calls: 190, start: 20_000, growth: 5_000, t0: i * 1e6 });
+    calls.push(...list);
+  }
+  // 三次压缩各等了 50 秒
+  for (const s of [0, 1, 2]) calls[s * 190 + 100].compactMs = 50_000;
+  const advice = advise(calls, opts({ current: 983_616 }));
+  assert.equal(advice.facts.took, 50);
+  const cheapest = Math.min(...advice.curve.map((p) => p.cost));
+  assert.ok(advice.low <= cheapest * 1.01);
+  assert.ok(advice.compactsBest > advice.compacts);
+  assert.ok(advice.waitBest > advice.wait);
+});
+
 test("对话从来涨不大：省不到 3%，保持现在的设置", () => {
   const calls = [];
   for (let i = 0; i < 10; i++) {
